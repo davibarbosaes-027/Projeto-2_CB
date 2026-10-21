@@ -1,0 +1,9 @@
+ticker,empresa,data_evento,tipo,fonte,conferido,obs
+AMER3,Americanas,2023-01-19,RJ,fato relevante / imprensa (a conferir),não,
+OIBR3,Oi,2023-03-01,RJ,fato relevante / imprensa (a conferir),não,segunda RJ; a primeira foi em jun/2016 (CVM: em RJ desde 2016-06-29); Oi não está na base do Economatica
+LIGT3,Light,2023-05-12,RJ,fato relevante / imprensa (a conferir),não,
+GOLL4,Gol,2024-01-25,Chapter 11,fato relevante / imprensa (a conferir),não,registro cancelado na CVM; Gol não está na base do Economatica
+BHIA3,Casas Bahia,2024-04-28,RE,fato relevante / imprensa (a conferir),não,Economatica sem despesa financeira de 2015 a 2023
+AZUL3,Azul,2025-05-28,Chapter 11,fato relevante / imprensa (a conferir),não,ticker na B3 é AZUL4; na base do Economatica aparece como AZUL3
+MBLY3,Mobly,,a confirmar,a confirmar,não,tipo e data a confirmar; Mobly não está na base do Economatica
+FASA3,Fasa,2026-04-17,RJ,CVM cad_cia_aberta (SIT_EMISSOR desde 2026-04-17),não,data de início da situação 'em recuperação judicial' no cadastro da CVM

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+.vscode/
+
+# bases geradas: reproduzíveis a partir de data/raw/ rodando os notebooks
+data/processed/*.parquet
+data/processed/*.csv
+
+# base licenciada do Economatica: não pode ser redistribuída (ver README para extrair)
+data/raw/economatica/
