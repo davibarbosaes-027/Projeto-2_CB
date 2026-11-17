@@ -46,6 +46,49 @@ PREVALENCIA_REF = (0.15, 0.20)   # faixa de referência da literatura para empre
 N_PARAMETROS_PREVISTOS = 13
 ARQ_EVENTOS = DATA_RAW / 'eventos' / 'eventos_credito.csv'
 
+# ---------------------------------------------------------------- Fase 4: modelagem
+# Definição do alvo usada nos modelos (chave de DEFINICOES_ALVO). A notebooks/04_alvo.ipynb recomenda a B
+# (EBITDA); a escolha é da dupla. A robustez usa ALVO_ROBUSTEZ.   DECISÃO PENDENTE
+ALVO_MODELO = 'B'
+ALVO_ROBUSTEZ = 'A'
+
+SEED = 42
+
+# Explicativas contínuas (cruas: a winsorização e a imputação são feitas DENTRO do pipeline, só com o treino
+# de cada dobra, por isso não usamos as colunas *_w da base).
+FEATURES_NUM = ['alavancagem', 'divida_cp_share', 'roa', 'liquidez', 'fco_divida', 'log_ativo']
+FEATURES_FLAG = ['sem_divida']
+FEATURE_SETOR = 'setor'                  # categórica (macrossetor provisório)
+# Colunas que ganham base de splines na variante não linear (notebook 03: alavancagem com limiar, tamanho em U)
+SPLINE_COLS = ['alavancagem', 'log_ativo']
+
+# Regra para empresas SEM dívida (NaN estrutural em fco_divida e divida_cp_share).   DECISÃO PENDENTE
+# 'p99_zero' = fco_divida recebe o p99 do treino (capacidade de pagamento "infinita") e divida_cp_share, 0,
+#              mantendo a flag sem_divida (sugestão do notebook 03, seção 3).
+REGRA_SEM_DIVIDA = 'p99_zero'
+
+# Controle de tempo.   DECISÃO PENDENTE
+# None = sem controle (o modelo mede risco relativo dentro de cada ano). Dummies de ano não existem para o teste.
+# Para usar variáveis macro (Selic, PIB...), crie ARQ_MACRO com a coluna `ano` + colunas numéricas e liste-as em MACRO_COLS.
+ARQ_MACRO = DATA_RAW / 'macro' / 'macro_anual.csv'
+MACRO_COLS = []
+
+# Validação temporal EXPANDIDA dentro do treino (t 2010–2018) para escolher hiperparâmetros.
+# O alvo de t olha t+1 e t+2, então a dobra de validação começa GAP_ANOS+1 anos depois do último ano de treino.
+GAP_ANOS = 2
+ANOS_VAL_CV = [2015, 2016, 2017, 2018]  # um ano de validação por dobra (treino = 2010 .. ano − GAP_ANOS − 1)
+MIN_EVENTOS_DOBRA = 10                  # dobras com menos eventos no treino são descartadas
+REGRA_C = 'max'         # 'max' = o C de maior AUC-PR fora da amostra. '1ep' = o mais regularizado a até 1 erro-padrão do melhor:
+                        # CUIDADO, como a AUC-PR só olha o ranking, encolher os coeficientes quase não a piora, a curva é plana
+                        # e a regra de 1 EP tende a escorregar para a ponta mais regularizada da grade (modelo quase nulo).
+GRADE_C = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 1000]   # inverso da regularização L2 (menor = mais regularizado)
+
+# Avaliação
+BETA_LIMIAR = 2.0       # limiar que maximiza F-beta nas previsões fora da amostra (beta > 1 privilegia o recall)
+TOP_K = 0.20            # "ao marcar os 20% de maior risco, quantos eventos capturamos?"
+N_BOOT = 1000           # reamostragens por empresa (cluster) para os intervalos de confiança
+IC = (0.05, 0.95)       # intervalo de 90%: com 31 eventos no teste, 95% seria largo demais para ler
+
 # ---------------------------------------------------------------- tratamento
 WINSOR = (0.01, 0.99)   # percentis calculados só no treino
 
