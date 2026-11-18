@@ -10,3 +10,6 @@ data/processed/*.csv
 
 # base licenciada do Economatica: não pode ser redistribuída (ver README para extrair)
 data/raw/economatica/
+
+# DFP da CVM (~170 MB, pública): o código baixa sozinho (src/cvm_dfp.py)
+data/raw/cvm/dfp/

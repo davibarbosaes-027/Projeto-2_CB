@@ -67,6 +67,24 @@ def carregar_valor_mobiliario_cvm():
     return vm
 
 
+def acoes_em_bolsa(vm=None):
+    """Linhas do FCA de ações (ON, PN ou units) negociadas em bolsa. Nos FCAs antigos o código de negociação
+    costuma vir vazio, por isso ele NÃO é exigido aqui."""
+    vm = carregar_valor_mobiliario_cvm() if vm is None else vm
+    acoes = vm['Valor_Mobiliario'].str.contains('Ações|Units', na=False) & (vm['Mercado'] == 'Bolsa')
+    return vm[acoes]
+
+
+def ticker_por_cnpj(vm=None):
+    """Um código de negociação por CNPJ: o mais frequente no FCA mais recente em que a empresa tinha ações em bolsa
+    COM código padrão de ação (4 letras + 3 a 8 ou 11; descarta direitos e recibos, como GOLL54 ou GOLL80).
+    Empresas sem nenhum código ficam de fora (tratar à parte)."""
+    a = acoes_em_bolsa(vm).dropna(subset=['ticker'])
+    a = a[a['ticker'].str.fullmatch(r'[A-Z0-9]{4}([3-8]|11)')]
+    a = a[a['ano_fca'] == a.groupby('CNPJ_Companhia')['ano_fca'].transform('max')]
+    return a.groupby('CNPJ_Companhia')['ticker'].agg(lambda s: s.value_counts().index[0])
+
+
 def mapa_ticker_cnpj(tickers):
     """Liga cada ticker do Economatica a um CNPJ da CVM, em 3 etapas, guardando como casou:
 

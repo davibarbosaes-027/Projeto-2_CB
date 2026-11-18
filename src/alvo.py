@@ -27,9 +27,15 @@ def calcular(ea, nome):
         futuros.append(chave.reindex(idx).to_numpy())
     f = np.column_stack(futuros)
     observado = ~np.isnan(f).any(axis=1)
-    out['Y'] = np.where(observado, (f == 1).all(axis=1).astype(float), np.nan)
+    y_cob = np.where(observado, (f == 1).all(axis=1).astype(float), np.nan)
 
-    out['em_risco'] = ((out['cob'] >= 1) & out['Y'].notna() & ~ea['pre_registro'].astype(bool)
+    # evento de crédito em t+1..t+h (RJ, falência, saída da bolsa em crise) também é Y = 1, mesmo sem balanço
+    from .base import regra_evento
+    na_janela, ja_teve = regra_evento(ea['ano'], ea.get('ano_evento_credito'), h)
+    out['Y'] = np.where(na_janela, 1.0, y_cob)
+    out['Y_evento'] = na_janela & (y_cob != 1)          # Y = 1 só por causa do evento
+
+    out['em_risco'] = ((out['cob'] >= 1) & out['Y'].notna() & ~ea['pre_registro'].astype(bool) & ~ja_teve
                        & ea['ano'].between(cfg.ANO_INI, cfg.ULTIMO_ANO_DADOS - h))
     return out
 

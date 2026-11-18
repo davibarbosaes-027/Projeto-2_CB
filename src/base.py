@@ -20,11 +20,55 @@ def empresa_ano(df_trim):
     return d.reset_index(drop=True)
 
 
+# ---------------------------------------------------------------- 2. empresas fora do Economatica (DFP da CVM)
+COLS_FINANCEIRAS = ['ativo_total', 'ativo_circulante', 'passivo_circulante', 'patrimonio_liquido', 'caixa',
+                    'emprestimos_cp', 'emprestimos_lp', 'divida_bruta', 'divida_liquida', 'reservas_lucro',
+                    'receita', 'desp_financeira', 'ebit', 'ebitda', 'lucro_liquido_12m', 'caixa_operacional_12m']
+
+
+def empresas_dfp(cnpjs_economatica, tickers_economatica, cad1):
+    """Empresa-ano da DFP para as companhias NÃO financeiras que tiveram ações em bolsa e não estão no Economatica.
+
+    São, na grande maioria, as que cancelaram o registro entre 2010 e 2026 (o viés de sobrevivência do Screening).
+    Devolve (painel no formato de empresa_ano, mapa ticker -> CNPJ no formato de dados.mapa_ticker_cnpj).
+    """
+    from . import cvm_dfp
+    p = cvm_dfp.carregar_painel()
+    vm = dados.carregar_valor_mobiliario_cvm()
+    tk = dados.ticker_por_cnpj(vm)
+
+    financeiras = set(cad1.loc[cad1['financeira'], 'CNPJ_CIA'])
+    universo = set(dados.acoes_em_bolsa(vm)['CNPJ_Companhia']) - set(cnpjs_economatica) - financeiras
+    p = p[p['CNPJ_CIA'].isin(universo) & p['ano'].between(cfg.ANO_INI, cfg.ANO_FIM)].copy()
+
+    # ticker: código do FCA (sem código nos FCAs antigos -> 'CVM' + código CVM); se já existe no Economatica
+    # (código reaproveitado por outra empresa) ou repete, ganha sufixo
+    mapa = pd.DataFrame({'CNPJ_CIA': sorted(p['CNPJ_CIA'].unique())})
+    cod_cvm = cad1.set_index('CNPJ_CIA')['CD_CVM'].str.lstrip('0')
+    mapa['ticker'] = mapa['CNPJ_CIA'].map(tk).fillna('CVM' + mapa['CNPJ_CIA'].map(cod_cvm).fillna(mapa['CNPJ_CIA']))
+    usados = set(tickers_economatica)
+    finais = []
+    for t in mapa['ticker']:
+        novo, k = t, 1
+        while novo in usados:
+            k += 1
+            novo = f'{t}_{k}'
+        usados.add(novo)
+        finais.append(novo)
+    mapa['ticker'] = finais
+    mapa['como_casou'] = 'dfp'
+
+    p = p.merge(mapa[['CNPJ_CIA', 'ticker']], on='CNPJ_CIA')
+    return p[['ticker', 'ano'] + COLS_FINANCEIRAS], mapa[['ticker', 'CNPJ_CIA', 'como_casou']]
+
+
 # ---------------------------------------------------------------- 3. CVM
 def setor_macro(setor_ativ):
-    """SETOR_ATIV da CVM -> macrossetor provisório (cfg.SETOR_MACRO)."""
+    """SETOR_ATIV da CVM -> macrossetor provisório (cfg.SETOR_MACRO).
+    Sem setor na CVM (3 empresas, nenhum evento) -> 'Holdings e outros': uma categoria própria tão pequena não tem
+    nenhum Y = 1 e causava separação perfeita na logística sem penalização (notebook 05)."""
     s = setor_ativ.str.replace(r'^Emp\. Adm\. Part\. - ', '', regex=True)
-    return s.map(cfg.SETOR_MACRO).fillna('Sem classificação')
+    return s.map(cfg.SETOR_MACRO).fillna('Holdings e outros')
 
 
 def juntar_cvm(ea, mapa, cad1):
@@ -39,13 +83,88 @@ def juntar_cvm(ea, mapa, cad1):
     return out
 
 
-# ---------------------------------------------------------------- 4. alvo
+# ---------------------------------------------------------------- 4a. evento de crédito
+def eventos_credito(ea, cad1):
+    """Ano do primeiro evento de crédito de cada ticker (RJ, RE, falência, liquidação ou saída da bolsa em crise).
+
+    Uma empresa conta como "em crise" se a situação de emissor, o motivo do cancelamento ou a razão social indicam
+    crise (cfg.PADRAO_*). O ano do evento é o MENOR entre:
+      - o ano de início da situação de emissor (RJ, falência...);
+      - o ano do cancelamento do registro;
+      - o primeiro ano sem balanço (último ano no painel + 1), se ela parou de publicar antes do fim dos dados.
+    Mais a lista à mão (data/raw/eventos/eventos_credito.csv). Devolve um DataFrame por ticker.
+    """
+    ult = ea.groupby('ticker')['ano'].max()
+    info = ea.drop_duplicates('ticker').set_index('ticker')[['CNPJ_CIA']].join(ult.rename('ultimo_ano'))
+    c = cad1.set_index('CNPJ_CIA')[['DENOM_SOCIAL', 'SIT', 'DT_CANCEL', 'MOTIVO_CANCEL', 'SIT_EMISSOR',
+                                    'DT_INI_SIT_EMISSOR']]
+    info = info.join(c, on='CNPJ_CIA')
+
+    sit = info['SIT_EMISSOR'].fillna('').str.upper().str.contains(cfg.PADRAO_SIT_CRISE)
+    canc = (info['SIT'] == 'CANCELADA') & info['MOTIVO_CANCEL'].fillna('').str.upper().str.contains(cfg.PADRAO_CANCEL_CRISE)
+    nome = info['DENOM_SOCIAL'].fillna('').str.upper().str.contains(cfg.PADRAO_NOME_CRISE)
+    crise = sit | canc | nome
+
+    ano_sit = pd.to_datetime(info['DT_INI_SIT_EMISSOR'], errors='coerce').dt.year.where(sit)
+    ano_canc = info['DT_CANCEL'].dt.year.where(info['SIT'] == 'CANCELADA')
+    parou = (info['ultimo_ano'] + 1).where(info['ultimo_ano'] < cfg.ULTIMO_ANO_DADOS)
+    cand = pd.concat([ano_sit, ano_canc.where(crise), parou.where(crise)], axis=1)
+    info['ano_evento_credito'] = cand.min(axis=1)
+    s = info['SIT_EMISSOR'].fillna('')
+    info['tipo_evento_credito'] = np.select(
+        [sit & s.str.contains('FALID'), sit & s.str.contains('LIQUIDA'),
+         sit & s.str.contains('EXTRAJUDICIAL'), sit & s.str.contains('RECUPERA'),
+         canc & info['MOTIVO_CANCEL'].str.contains('LIQUIDA', na=False), canc, nome],
+        ['falência', 'liquidação', 'RE', 'RJ', 'liquidação', 'cancelamento de ofício', 'crise (razão social)'],
+        default=None)
+    info['fonte_evento'] = np.where(crise, 'CVM', None)
+
+    # lista conferida à mão: casa pelo ticker da base ou, se o ticker for outro (ex.: GOLL4), pelo CNPJ do FCA;
+    # vale a data mais antiga
+    man = pd.read_csv(cfg.ARQ_EVENTOS, dtype=str)
+    man['ano'] = pd.to_datetime(man['data_evento'], errors='coerce').dt.year
+    vm = dados.carregar_valor_mobiliario_cvm().dropna(subset=['ticker'])
+    cnpj_fca = vm.drop_duplicates('ticker', keep='last').set_index('ticker')['CNPJ_Companhia']
+    ticker_da_base = info.reset_index().dropna(subset=['CNPJ_CIA']).drop_duplicates('CNPJ_CIA').set_index('CNPJ_CIA')['ticker']
+    man['ticker'] = np.where(man['ticker'].isin(info.index), man['ticker'],
+                             man['ticker'].map(cnpj_fca).map(ticker_da_base))
+    man = man.dropna(subset=['ano', 'ticker']).sort_values('ano').drop_duplicates('ticker').set_index('ticker')
+    novo = info.loc[man.index, 'ano_evento_credito'].isna() | (man['ano'] < info.loc[man.index, 'ano_evento_credito'])
+    idx = man.index[novo.to_numpy()]
+    info.loc[idx, 'ano_evento_credito'] = man.loc[idx, 'ano']
+    info.loc[idx, 'tipo_evento_credito'] = man.loc[idx, 'tipo']
+    info.loc[idx, 'fonte_evento'] = 'lista manual'
+
+    out = info[info['ano_evento_credito'].notna()]
+    return out[['ano_evento_credito', 'tipo_evento_credito', 'fonte_evento']].reset_index()
+
+
+def adicionar_evento_credito(ea, cad1):
+    ev = eventos_credito(ea, cad1)
+    out = ea.drop(columns=[c for c in ev.columns if c != 'ticker' and c in ea.columns]).merge(ev, on='ticker', how='left')
+    out['ano_evento_credito'] = out['ano_evento_credito'].astype(float)
+    return out
+
+
+# ---------------------------------------------------------------- 4b. alvo
+def regra_evento(ano, ano_evento, h):
+    """(evento em t+1..t+h, evento em t ou antes). Sem evento ou com cfg.EVENTO_CREDITO_NO_ALVO = False: tudo False."""
+    if not cfg.EVENTO_CREDITO_NO_ALVO or ano_evento is None:
+        z = np.zeros(len(ano), dtype=bool)
+        return z, z
+    ev = np.asarray(ano_evento, dtype=float)
+    ano = np.asarray(ano, dtype=float)
+    return (ev > ano) & (ev <= ano + h), ev <= ano
+
+
 def adicionar_alvo(ea):
     """cobertura, distress, Y e a marcação da amostra em risco.
 
     - cobertura_t = EBIT_t / despesa financeira_t; se a despesa for <= 0 (contaminação cambial) -> NaN.
     - distress_t = 1 se cobertura_t < 1 (EBIT negativo também conta).
     - Y_t = 1 se distress em t+1 E t+2; 0 se t+1 e t+2 são classificáveis e não ambos em distress; NaN caso contrário.
+    - Y_t = 1 também se há evento de crédito em t+1 ou t+2 (cfg.EVENTO_CREDITO_NO_ALVO), mesmo sem balanço;
+      quem já teve o evento em t ou antes sai da amostra em risco.
     O t+1 e o t+2 são procurados por ANO (não pela próxima linha), para não pular buracos no painel.
     """
     ea = ea.copy()
@@ -60,9 +179,14 @@ def adicionar_alvo(ea):
         ea[f'presente_t{k}'] = idx.isin(chave.index)
 
     d1, d2 = ea['distress_t1'], ea['distress_t2']
-    ea['Y'] = np.where(d1.notna() & d2.notna(), ((d1 == 1) & (d2 == 1)).astype(float), np.nan)
+    y_cob = np.where(d1.notna() & d2.notna(), ((d1 == 1) & (d2 == 1)).astype(float), np.nan)
+    na_janela, ja_teve = regra_evento(ea['ano'], ea.get('ano_evento_credito'), 2)
+    ea['Y'] = np.where(na_janela, 1.0, y_cob)
+    ea['origem_Y'] = np.select([na_janela & (y_cob == 1), na_janela, y_cob == 1], ['cobertura e evento', 'evento', 'cobertura'],
+                               default=None)
 
-    ea['em_risco'] = (ea['cobertura'] >= 1) & ea['Y'].notna() & ea['ano'].between(cfg.ANO_INI, cfg.ANO_T_MAX)
+    ea['em_risco'] = ((ea['cobertura'] >= 1) & ea['Y'].notna() & ~ja_teve
+                      & ea['ano'].between(cfg.ANO_INI, cfg.ANO_T_MAX))
     return ea
 
 
@@ -73,8 +197,8 @@ def funil_amostra(ea):
     m = passos[0][1]
     m = m & d['cobertura'].notna();             passos.append(('cobertura classificável em t', m))
     m = m & (d['cobertura'] >= 1);              passos.append(('fora de distress em t (cobertura ≥ 1)', m))
-    m = m & d['presente_t1'] & d['presente_t2']; passos.append(('empresa presente em t+1 e t+2', m))
-    m = m & d['Y'].notna();                     passos.append(('t+1 e t+2 classificáveis (Y observado)', m))
+    m = m & d['Y'].notna();                     passos.append(('Y observado (t+1 e t+2 classificáveis ou evento de crédito)', m))
+    m = m & d['em_risco'];                      passos.append(('sem evento de crédito em t ou antes', m))
     out = pd.DataFrame({'etapa': [p[0] for p in passos], 'linhas': [int(p[1].sum()) for p in passos]})
     out['perdidas na etapa'] = (-out['linhas'].diff()).fillna(0).astype(int)
     return out
@@ -135,7 +259,12 @@ def aplicar_winsor(ea, limites):
 
 # ---------------------------------------------------------------- 9. dicionário
 DICIONARIO = {
-    'ticker': 'Código de negociação na B3 (sem o sufixo <XBSP> do Economatica)',
+    'ticker': 'Código de negociação na B3 (sem o sufixo <XBSP> do Economatica; nas empresas da DFP, o código do FCA)',
+    'fonte': 'Economatica (empresas listadas hoje) ou CVM (DFP) (empresas fora do Screening, quase todas canceladas)',
+    'ano_evento_credito': 'Ano do 1º evento de crédito (RJ, RE, falência, liquidação ou saída da bolsa em crise); NaN se nenhum',
+    'tipo_evento_credito': 'Tipo do evento de crédito',
+    'fonte_evento': 'De onde veio o evento: CVM (cadastro) ou lista manual (data/raw/eventos)',
+    'origem_Y': 'Por que Y = 1: cobertura (2 anos < 1), evento (de crédito em t+1..t+2) ou os dois',
     'ano': 'Ano t (dados do 4º trimestre = ano completo)',
     'CNPJ_CIA': 'CNPJ da companhia (ligado pelo FCA da CVM; ver como_casou)',
     'como_casou': 'Como o ticker foi ligado ao CNPJ: exato, raiz (4 letras), manual, manual_conferir, sem_match',
@@ -172,8 +301,8 @@ DICIONARIO = {
     'distress_t2': 'distress em t+2',
     'presente_t1': 'Empresa tem balanço em t+1',
     'presente_t2': 'Empresa tem balanço em t+2',
-    'Y': 'ALVO: 1 se distress em t+1 e t+2; 0 se ambos classificáveis e não ambos em distress; NaN caso contrário',
-    'em_risco': 'True se está na amostra de modelagem: cobertura_t ≥ 1, Y observado e t ≤ 2023',
+    'Y': 'ALVO: 1 se distress em t+1 e t+2 OU evento de crédito em t+1..t+2; 0 se ambos classificáveis e nenhum dos dois; NaN caso contrário',
+    'em_risco': 'True se está na amostra de modelagem: cobertura_t ≥ 1, Y observado, sem evento de crédito até t e t ≤ 2023',
     'alavancagem': 'H1 (+): dívida bruta / ativo total',
     'divida_cp_share': 'H1 (+): empréstimos CP / (CP + LP); NaN se sem dívida',
     'roa': 'H2 (−): lucro líquido 12m / ativo total',
@@ -217,8 +346,17 @@ def construir():
     cad1 = dados.cad_por_cnpj(dados.carregar_cad_cvm())
     mapa = dados.mapa_ticker_cnpj(sorted(ea['ticker'].unique()))
     info['mapa'] = mapa
+    ea['fonte'] = 'Economatica'
+
+    if cfg.INCLUIR_DFP:
+        extra, mapa_dfp = empresas_dfp(mapa['CNPJ_CIA'].dropna(), ea['ticker'].unique(), cad1)
+        extra['fonte'] = 'CVM (DFP)'
+        info['dfp'] = {'empresas': extra['ticker'].nunique(), 'empresa_anos': len(extra)}
+        ea = pd.concat([ea, extra], ignore_index=True)
+        mapa = pd.concat([mapa, mapa_dfp], ignore_index=True)
     ea = juntar_cvm(ea, mapa, cad1)
 
+    ea = adicionar_evento_credito(ea, cad1)
     ea = adicionar_alvo(ea)
     ea = adicionar_explicativas(ea)
     ea = adicionar_zscore(ea)

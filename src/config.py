@@ -15,6 +15,8 @@ ARQ_ECONOMATICA = [
 ]
 ARQ_CAD_CVM = DATA_RAW / 'cvm' / 'cad_cia_aberta.csv'
 DIR_FCA_CVM = DATA_RAW / 'cvm' / 'fca'
+DIR_DFP_CVM = DATA_RAW / 'cvm' / 'dfp'           # baixado pelo código (src/cvm_dfp.py), não versionado
+ARQ_DFP_PROCESSADO = DATA_PROCESSED / 'dfp_empresa_ano.parquet'
 
 # ---------------------------------------------------------------- período
 ANO_INI = 2010
@@ -45,6 +47,25 @@ PREVALENCIA_REF = (0.15, 0.20)   # faixa de referência da literatura para empre
 # log_ativo, Selic (8) + 5 dummies de macrossetor (6 macrossetores) = 13, sem contar o intercepto
 N_PARAMETROS_PREVISTOS = 13
 ARQ_EVENTOS = DATA_RAW / 'eventos' / 'eventos_credito.csv'
+
+# ---------------------------------------------------------------- correção do viés de sobrevivência
+# O Screening do Economatica só trouxe empresas listadas hoje. As companhias não financeiras com ações em bolsa
+# que NÃO estão no Economatica (quase todas canceladas entre 2010 e 2026) entram pela DFP da CVM (src/cvm_dfp.py),
+# que reproduz o Economatica em ~98% das empresas-ano (notebook 02, seção de validação).
+INCLUIR_DFP = True
+
+# Evento de crédito: a empresa que quebra costuma PARAR de publicar balanço, e aí a cobertura de t+1/t+2 não
+# existe e o Y ficaria NaN (o caso mais importante sairia da amostra). Por isso o alvo também vale 1 quando há
+# um evento de crédito em t+1..t+h. Fontes (todas da CVM, mais a lista conferida à mão):
+#   - situação do emissor: recuperação judicial/extrajudicial, falência ou liquidação (ano de início da situação);
+#   - cancelamento do registro por crise: de ofício (a CVM cancela quem parou de publicar) ou por liquidação;
+#     o ano do evento é o primeiro ano SEM balanço (último balanço + 1), limitado ao ano do cancelamento;
+#   - data/raw/eventos/eventos_credito.csv (RJ, RE, Chapter 11).
+# Empresas com o evento em t ou antes já "entraram" em distress e saem da amostra em risco.
+EVENTO_CREDITO_NO_ALVO = True
+PADRAO_SIT_CRISE = r'RECUPERA|FALID|LIQUIDA'          # SIT_EMISSOR do cadastro
+PADRAO_CANCEL_CRISE = r'OF[IÍ]CIO|LIQUIDA'            # MOTIVO_CANCEL do cadastro
+PADRAO_NOME_CRISE = r'RECUPERA[CÇ][AÃ]O JUDICIAL|FALID|EM LIQUIDA'   # razão social ("... - EM RECUPERAÇÃO JUDICIAL")
 
 # ---------------------------------------------------------------- Fase 4: modelagem
 # Definição do alvo usada nos modelos (chave de DEFINICOES_ALVO). A notebooks/04_alvo.ipynb recomenda a B
@@ -166,6 +187,7 @@ SETOR_MACRO = {
     'Hospedagem e Turismo': 'Consumo cíclico',
     'Brinquedos e Lazer': 'Consumo cíclico',
     'Educação': 'Consumo cíclico',
+    'Gráficas e Editoras': 'Consumo cíclico',
     'Alimentos': 'Consumo não cíclico',
     'Bebidas e Fumo': 'Consumo não cíclico',
     'Agricultura (Açúcar, Álcool e Cana)': 'Consumo não cíclico',

@@ -56,6 +56,7 @@ def preparar_amostra(ea, definicao=None):
     d = ea.drop(columns=[c for c in ('Y', 'em_risco', 'distress') if c in ea.columns]).copy()
     d['Y'] = a['Y']
     d['em_risco'] = a['em_risco']
+    d['Y_evento'] = a['Y_evento']          # Y = 1 só por evento de crédito (sem 2 anos de cobertura < 1 observados)
     d = juntar_macro(d)
     d = d[d['em_risco'] & d['split'].notna()].copy()
     d['Y'] = d['Y'].astype(int)
