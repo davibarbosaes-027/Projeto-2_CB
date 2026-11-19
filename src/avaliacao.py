@@ -204,3 +204,47 @@ def fig_selecao_c(tab, c_escolhido):
     ax.set_ylabel('AUC-PR fora da amostra')
     ax.yaxis.set_major_formatter(style.formatador(2))
     return fig, ax
+
+
+def brier_ingenuo(y_teste, taxa_treino):
+    """Brier de prever SEMPRE a taxa de eventos do treino (a "previsão ingênua" do PDF) e o ganho de cada modelo sobre ela:
+    skill = 1 − Brier / Brier_ingênuo (>0 supera o ingênuo, 0 empata, <0 piora). Só faz sentido para probabilidades
+    calibradas (sem pesos de classe)."""
+    y = np.asarray(y_teste, dtype=float)
+    return float(np.mean((y - taxa_treino) ** 2))
+
+
+def fig_residuos(binados_lpm, binados_logit):
+    """Resíduos médios por faixa de valor ajustado, para o modelo linear (esquerda) e a logística (direita)."""
+    fig, axs = plt.subplots(1, 2, figsize=cfg.TAMANHO_FIG, sharey=True)
+    for ax, b, tit in zip(axs, (binados_lpm, binados_logit), ('Modelo linear de probabilidade', 'Logística')):
+        ax.axhline(0, color=cfg.COR_EIXO, lw=1)
+        ax.fill_between(b['ajustado'], -b['banda'], b['banda'], color='#E6E6E6', label='±2 erros-padrão')
+        ax.plot(b['ajustado'], b['resíduo'], 'o-', color=cfg.COR_DESTAQUE, lw=2.5, ms=7)
+        ax.set_title(tit, fontsize=11.5, loc='left', color=cfg.COR_EIXO)
+        ax.set_xlabel('Probabilidade ajustada (média da faixa)')
+        ax.xaxis.set_major_formatter(style.formatador(0, pct=True))
+        ax.yaxis.set_major_formatter(style.formatador(1, pct=True))
+    axs[0].set_ylabel('Resíduo médio (observado − ajustado)')
+    axs[0].legend(loc='upper left', fontsize=9.5)
+    return fig, axs
+
+
+def fig_importancia(tab, destaque, coluna='queda AUC-ROC'):
+    """Importância por permutação por variável, com um painel por modelo (mesma escala). `tab` = {modelo: DataFrame}."""
+    nomes = list(tab)
+    ordem = tab[destaque].sort_values(coluna).index
+    rot = {'alavancagem': 'Alavancagem', 'divida_cp_share': 'Dívida de curto prazo', 'roa': 'ROA', 'liquidez': 'Liquidez',
+           'fco_divida': 'FCO / dívida', 'log_ativo': 'Tamanho', 'sem_divida': 'Sem dívida (flag)', 'setor': 'Setor'}
+    fig, axs = plt.subplots(1, len(nomes), figsize=cfg.TAMANHO_FIG, sharey=True)
+    teto = max(tab[n][coluna].max() for n in nomes) * 1.15
+    for ax, n in zip(np.atleast_1d(axs), nomes):
+        v = tab[n].loc[ordem, coluna]
+        ax.barh([rot.get(i, i) for i in ordem], v, color=cfg.COR_DESTAQUE if n == destaque else '#8C8C8C')
+        ax.axvline(0, color=cfg.COR_EIXO, lw=1)
+        ax.set_title(n, fontsize=11.5, loc='left', color=cfg.COR_EIXO)
+        ax.set_xlim(min(0, v.min() * 1.3), teto)
+        ax.set_xlabel('Queda da ' + coluna.replace('queda ', '') + ' ao embaralhar')
+        ax.xaxis.set_major_formatter(style.formatador(2))
+        ax.grid(axis='y', visible=False)
+    return fig, axs

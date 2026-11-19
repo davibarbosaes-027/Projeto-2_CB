@@ -59,6 +59,7 @@ SEED = 42
 FEATURES_NUM = ['alavancagem', 'divida_cp_share', 'roa', 'liquidez', 'fco_divida', 'log_ativo']
 FEATURES_FLAG = ['sem_divida']
 FEATURE_SETOR = 'setor'                  # categórica (macrossetor provisório)
+MIN_EVENTOS_SETOR = 5                    # setor com menos eventos no treino vira 'Outros setores' (evita separação perfeita na logística)
 # Colunas que ganham base de splines na variante não linear (notebook 03: alavancagem com limiar, tamanho em U)
 SPLINE_COLS = ['alavancagem', 'log_ativo']
 
@@ -82,6 +83,9 @@ REGRA_C = 'max'         # 'max' = o C de maior AUC-PR fora da amostra. '1ep' = o
                         # CUIDADO, como a AUC-PR só olha o ranking, encolher os coeficientes quase não a piora, a curva é plana
                         # e a regra de 1 EP tende a escorregar para a ponta mais regularizada da grade (modelo quase nulo).
 GRADE_C = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 1000]   # inverso da regularização L2 (menor = mais regularizado)
+
+# Inferência: setores com menos eventos que isso no treino são agrupados (sem eventos, a logística sem penalização diverge)
+MIN_EVENTOS_SETOR = 5
 
 # Avaliação
 BETA_LIMIAR = 2.0       # limiar que maximiza F-beta nas previsões fora da amostra (beta > 1 privilegia o recall)

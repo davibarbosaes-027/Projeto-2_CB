@@ -11,7 +11,7 @@ import pandas as pd
 from scipy import stats
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -105,6 +105,35 @@ class Winsorizar(BaseEstimator, TransformerMixin):
         return X
 
 
+class AgruparSetores(BaseEstimator, TransformerMixin):
+    """Junta em 'Outros setores' os setores com menos de `min_eventos` eventos NO CONJUNTO DE AJUSTE (ou setor ausente).
+    Um setor sem eventos (ex.: 'Sem classificação') faz a logística sem penalização divergir (separação perfeita), e com
+    poucos eventos o coeficiente não é estimável com sentido. Se o próprio 'Outros setores' ainda ficar abaixo do mínimo,
+    essas empresas são somadas ao maior setor. Categorias nunca vistas no ajuste (teste) também vão para 'Outros'."""
+
+    def __init__(self, coluna=cfg.FEATURE_SETOR, min_eventos=cfg.MIN_EVENTOS_SETOR, rotulo='Outros setores'):
+        self.coluna = coluna
+        self.min_eventos = min_eventos
+        self.rotulo = rotulo
+
+    def fit(self, X, y=None):
+        y = pd.Series(np.asarray(y), index=X.index)
+        g = pd.DataFrame({'n': X[self.coluna].value_counts(), 'ev': y.groupby(X[self.coluna]).sum()}).fillna(0)
+        self.mantidos_ = set(g.index[g['ev'] >= self.min_eventos])
+        raros = g.loc[~g.index.isin(self.mantidos_)]
+        self.agrupados_ = sorted(raros.index.astype(str))
+        self.destino_ = self.rotulo
+        if len(raros) and raros['ev'].sum() < self.min_eventos and self.mantidos_:
+            self.destino_ = g.loc[list(self.mantidos_), 'n'].idxmax()      # ainda poucos eventos: soma ao maior setor
+        self.tabela_ = g
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        X[self.coluna] = X[self.coluna].where(X[self.coluna].isin(self.mantidos_), self.destino_)
+        return X
+
+
 class RegraSemDivida(BaseEstimator, TransformerMixin):
     """Empresas sem dívida têm NaN estrutural em fco_divida e divida_cp_share (a flag `sem_divida` guarda a informação).
 
@@ -133,7 +162,7 @@ class RegraSemDivida(BaseEstimator, TransformerMixin):
 
 
 def preprocessador(splines=False, usar_setor=True, regra=None, colunas_num=None):
-    """winsor -> regra do sem-dívida -> (imputação pela mediana + padronização) + flag + dummies de setor.
+    """(setores raros -> 'Outros setores') -> winsor -> regra do sem-dívida -> (imputação pela mediana + padronização) + flag + dummies de setor.
 
     splines=True troca as colunas de cfg.SPLINE_COLS por uma base de splines cúbicos (não linearidade da alavancagem
     e do tamanho, notebook 03). Os dummies de setor ficam completos (sem categoria de referência): a regularização L2
@@ -152,9 +181,10 @@ def preprocessador(splines=False, usar_setor=True, regra=None, colunas_num=None)
     if usar_setor:
         blocos.append(('setor', OneHotEncoder(handle_unknown='ignore', sparse_output=False), [cfg.FEATURE_SETOR]))
     ct = ColumnTransformer(blocos, verbose_feature_names_out=False).set_output(transform='pandas')
-    return Pipeline([('winsor', Winsorizar(cols=num)),
-                     ('sem_divida', RegraSemDivida(regra or cfg.REGRA_SEM_DIVIDA)),
-                     ('ct', ct)])
+    etapas = [('setores', AgruparSetores())] if usar_setor else []
+    return Pipeline(etapas + [('winsor', Winsorizar(cols=num)),
+                              ('sem_divida', RegraSemDivida(regra or cfg.REGRA_SEM_DIVIDA)),
+                              ('ct', ct)])
 
 
 # ---------------------------------------------------------------- modelos
@@ -180,6 +210,14 @@ def pipeline_gb(usar_setor=True, regra=None):
     é direta, basta substituir o classificador."""
     clf = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=150, min_samples_leaf=20,
                                          l2_regularization=1.0, class_weight='balanced', random_state=cfg.SEED)
+    return Pipeline([('prep', preprocessador(False, usar_setor, regra)), ('clf', clf)])
+
+
+def pipeline_rf(usar_setor=True, regra=None):
+    """Random forest (o ML do plano inicial), também raso e com hiperparâmetros FIXOS: folhas grandes (poucos eventos)
+    e pesos balanceados por árvore. Entra como segundo desafiante, sem seleção de modelo pelo teste."""
+    clf = RandomForestClassifier(n_estimators=500, min_samples_leaf=15, max_features='sqrt', class_weight='balanced_subsample',
+                                 n_jobs=-1, random_state=cfg.SEED)
     return Pipeline([('prep', preprocessador(False, usar_setor, regra)), ('clf', clf)])
 
 
@@ -248,8 +286,9 @@ def selecionar_c(treino, fabrica, grade=None, dobras=None):
     m = oofs[melhor['C']].notna()
     ep = avaliacao.se_auc_pr(y[m], oofs[melhor['C']][m], treino.loc[m, 'ticker'])
     c_esc = float(tab.loc[tab['AUC-PR'] >= melhor['AUC-PR'] - ep, 'C'].min()) if cfg.REGRA_C == '1ep' else float(melhor['C'])
-    if c_esc in (min(grade), max(grade)):
+    if c_esc == min(grade) or (c_esc == max(grade) and c_esc < 100):
         warnings.warn(f'C escolhido ({c_esc}) está na borda da grade: estenda cfg.GRADE_C nessa direção.')
+    # C >= 100 na ponta alta = praticamente sem regularização; estender a grade não muda nada (curva plana)
     tab['melhor'] = tab['C'] == melhor['C']
     tab['escolhido'] = tab['C'] == c_esc
     tab.attrs['ep'] = ep
@@ -339,6 +378,19 @@ def logit_agrupado(X, y, grupos):
     return out
 
 
+def _agrupar_setores_raros(setor, y, minimo=None):
+    """Setores com menos de `minimo` eventos no treino (cfg.MIN_EVENTOS_SETOR) viram 'Outros (poucos eventos)'.
+    Se, juntos, ainda não tiverem nenhum evento, entram no setor mais frequente (a categoria de referência):
+    uma categoria sem eventos faz a logística sem penalização divergir (separação perfeita)."""
+    minimo = cfg.MIN_EVENTOS_SETOR if minimo is None else minimo
+    ev = y.groupby(setor).sum()
+    raros = ev.index[ev < minimo]
+    if len(raros) == 0:
+        return setor
+    destino = 'Outros (poucos eventos)' if ev[raros].sum() >= 1 else setor.value_counts().idxmax()
+    return setor.where(~setor.isin(raros), destino)
+
+
 def matriz_inferencia(treino, regra='nenhuma', usar_setor=True):
     """Pré-processa o treino (winsor, padronização) e tira o setor de referência (o mais frequente).
     Os coeficientes das contínuas são por +1 desvio-padrão da variável winsorizada.
@@ -346,9 +398,14 @@ def matriz_inferencia(treino, regra='nenhuma', usar_setor=True):
     Usa regra='nenhuma' (mediana) em vez de 'p99_zero' DE PROPÓSITO: com um constante + flag, qualquer constante dá o
     mesmo ajuste sem penalização (a flag absorve o nível), mas só a mediana deixa a flag legível ("sem dívida" contra uma
     empresa com dívida típica). Com o p99, o coeficiente de `sem_divida` só desfaz o valor imputado (razão de chances
-    sem sentido, na casa das centenas)."""
+    sem sentido, na casa das centenas).
+
+    Setores com poucos eventos são agrupados (`_agrupar_setores_raros`); isso vale só para a inferência."""
+    d = treino[colunas_entrada()].copy()
+    if usar_setor:
+        d[cfg.FEATURE_SETOR] = _agrupar_setores_raros(d[cfg.FEATURE_SETOR], treino['Y'])
     prep = preprocessador(False, usar_setor, regra)
-    X = prep.fit_transform(treino[colunas_entrada()], treino['Y'])
+    X = prep.fit_transform(d, treino['Y'])
     if usar_setor:
         dummies = [c for c in X.columns if c.startswith(cfg.FEATURE_SETOR + '_')]
         ref = X[dummies].sum().idxmax()
@@ -380,6 +437,89 @@ def tabela_hipoteses(coefs, nivel=0.10):
                        'sinal estimado': '+' if r['coef'] > 0 else '−', 'odds_ratio': r['odds_ratio'], 'or_inf': r['or_inf'],
                        'or_sup': r['or_sup'], 'p': r['p'], 'veredito': ver})
     return pd.DataFrame(linhas).set_index('variável')
+
+
+# ---------------------------------------------------------------- regressão de referência: modelo linear de probabilidade
+def mqo_agrupado(X, y, grupos):
+    """Modelo linear de probabilidade (MQO com constante) e erro-padrão robusto agrupado por empresa. O coeficiente é a
+    mudança na probabilidade de distress (em pontos percentuais, ×100) por +1 desvio-padrão. É a "regressão de referência":
+    mais fácil de ler que a logística, mas com resíduos heterocedásticos por construção (Y é 0/1), por isso o EP robusto."""
+    Xc = np.column_stack([np.ones(len(X)), X.to_numpy(dtype=float)])
+    y = np.asarray(y, dtype=float)
+    pao = np.linalg.inv(Xc.T @ Xc)
+    b = pao @ Xc.T @ y
+    e = y - Xc @ b
+    g = pd.factorize(np.asarray(grupos))[0]
+    soma = np.zeros((g.max() + 1, Xc.shape[1]))
+    np.add.at(soma, g, Xc * e[:, None])
+    G, N, K = soma.shape[0], len(y), Xc.shape[1]
+    V = (G / (G - 1)) * ((N - 1) / (N - K)) * pao @ (soma.T @ soma) @ pao
+    ep = np.sqrt(np.diag(V))
+    z = b / ep
+    zc = stats.norm.ppf(cfg.IC[1])
+    out = pd.DataFrame({'coef': b, 'ep': ep, 'z': z, 'p': 2 * stats.norm.sf(np.abs(z)),
+                        'p.p.': 100 * b, 'pp_inf': 100 * (b - zc * ep), 'pp_sup': 100 * (b + zc * ep)},
+                       index=['const'] + list(X.columns))
+    out.attrs.update({'ajustados': Xc @ b, 'residuos': e, 'R2': 1 - (e ** 2).sum() / ((y - y.mean()) ** 2).sum()})
+    return out
+
+
+def vif_matriz(X):
+    """Fator de inflação da variância de cada coluna contínua de `X` (matriz pré-processada de `matriz_inferencia`), calculado
+    com a regressão da coluna nas demais. Referência usual: acima de 5 a 10 indica multicolinearidade preocupante."""
+    A = X.to_numpy(dtype=float)
+    out = {}
+    for j, c in enumerate(X.columns):
+        if c.startswith(cfg.FEATURE_SETOR + '_') or c in cfg.FEATURES_FLAG:
+            continue
+        outras = np.column_stack([np.ones(len(A)), np.delete(A, j, axis=1)])
+        b, *_ = np.linalg.lstsq(outras, A[:, j], rcond=None)
+        r2 = 1 - ((A[:, j] - outras @ b) ** 2).sum() / ((A[:, j] - A[:, j].mean()) ** 2).sum()
+        out[c] = 1 / (1 - r2)
+    return pd.Series(out, name='VIF')
+
+
+def ajustados_logit(X, coefs):
+    """Probabilidades ajustadas da logística sem penalização (saída de `logit_agrupado`)."""
+    eta = coefs.loc['const', 'coef'] + X.to_numpy(dtype=float) @ coefs.drop('const')['coef'].to_numpy()
+    return 1 / (1 + np.exp(-np.clip(eta, -30, 30)))
+
+
+def residuos_binados(y, p, bins=10):
+    """Resíduo médio (y − p) por faixa de valor ajustado, com ±2 erros-padrão. Se o modelo está bem especificado, as faixas
+    ficam em torno de zero (dentro da banda). Usa quantis dos ajustados, então cada faixa tem ~o mesmo nº de observações."""
+    d = pd.DataFrame({'y': np.asarray(y, dtype=float), 'p': np.asarray(p, dtype=float)})
+    d['faixa'] = pd.qcut(d['p'], bins, duplicates='drop')
+    g = d.groupby('faixa', observed=True)
+    out = pd.DataFrame({'ajustado': g['p'].mean(), 'resíduo': g.apply(lambda x: (x['y'] - x['p']).mean()),
+                        'n': g.size()})
+    out['banda'] = 2 * g.apply(lambda x: (x['y'] - x['p']).std(ddof=1)).to_numpy() / np.sqrt(out['n'].to_numpy())
+    return out.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------- importância por permutação (comparar regressão e ML)
+def importancia_permutacao(fabrica, treino, dobras, n_rep=20, seed=None):
+    """Importância por permutação, SÓ com dados de treino: em cada dobra temporal ajusta no passado, embaralha uma variável
+    por vez na validação e mede a queda da AUC-PR e da AUC-ROC. Média das dobras e das repetições. Variáveis em grupos:
+    cada coluna de entrada (o setor conta como uma só). Queda grande = o modelo depende da variável; ~0 = ignora."""
+    rng = np.random.default_rng(cfg.SEED if seed is None else seed)
+    cols = list(cfg.FEATURES_NUM) + list(cfg.FEATURES_FLAG) + [cfg.FEATURE_SETOR]   # sem o z_score, que só o Z'' usa
+    linhas = []
+    for tr, va, ano in dobras:
+        m = ajustar(fabrica(), treino.iloc[tr])
+        val = treino.iloc[va].reset_index(drop=True)
+        y = val['Y'].to_numpy()
+        base = avaliacao.metricas(y, prever(m, val))
+        for c in cols:
+            for _ in range(n_rep):
+                v = val.copy()
+                v[c] = rng.permutation(v[c].to_numpy())
+                mt = avaliacao.metricas(y, prever(m, v))
+                linhas.append({'variável': c, 'dobra': ano, 'queda AUC-PR': base['AUC-PR'] - mt['AUC-PR'],
+                               'queda AUC-ROC': base['AUC-ROC'] - mt['AUC-ROC']})
+    d = pd.DataFrame(linhas)
+    por_dobra = d.groupby(['variável', 'dobra']).mean().groupby('variável').mean()
+    return por_dobra.sort_values('queda AUC-ROC', ascending=False)
 
 
 # ---------------------------------------------------------------- cenários de robustez
