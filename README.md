@@ -2,8 +2,6 @@
 
 Projeto do Insper Data, Ciclo Básico 2026.2.
 
-> Rascunho. As seções marcadas como *(a preencher)* dependem das próximas fases.
-
 ## Problema e pergunta
 
 Empresas que entram em distress financeiro, ou seja, que deixam de gerar resultado operacional suficiente para pagar os juros da dívida, impõem perdas a credores, acionistas e funcionários. Antecipar esses casos é o objetivo de modelos de risco de crédito como o Z-score de Altman.
@@ -50,15 +48,18 @@ Cuidados que o código já trata:
 - Formulário Cadastral (FCA), um zip por ano de 2010 a 2026: `https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FCA/DADOS/fca_cia_aberta_AAAA.zip` → `data/raw/cvm/fca/fca_AAAA.zip`. Usamos a tabela `valor_mobiliario`, que liga o código de negociação (ticker) ao CNPJ, porque a base do Economatica não traz CNPJ, e que diz quais companhias tinham ações em bolsa.
 - Demonstrações Financeiras Padronizadas (DFP), um zip por ano de 2010 a 2026: `https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_AAAA.zip` → `data/raw/cvm/dfp/dfp_AAAA.zip`. **O código baixa sozinho** na primeira execução (`src/cvm_dfp.py`; ~170 MB, fora do git). Traz o balanço anual de todas as companhias abertas, **inclusive as canceladas**, e é a fonte das empresas que o Screening do Economatica não trouxe.
 
-## Definição do alvo (Fase 2: `notebooks/02_base.ipynb`)
+## Definição do alvo (Fases 2 e 3: `notebooks/02_base.ipynb` e `notebooks/04_alvo.ipynb`)
 
-- `cobertura_t = EBIT_t / despesa financeira_t`, usando o ano completo (4º trimestre). Se a despesa for menor ou igual a zero (contaminação cambial), a cobertura é NaN.
+O notebook 04 compara quatro definições antes de qualquer modelo e recomenda a **B**, que é a usada na modelagem (`cfg.ALVO_MODELO`): **EBITDA / despesa financeira < 1 em t+1 e t+2**. Com EBIT (definição A), 47% das empresas ficam abaixo de 1 por ano; com EBITDA, 34%. Na medida de 3 anos seguidos, comparável à das empresas "zumbi" da literatura (15–20%), o EBITDA dá 21% e o EBIT, 31%. A definição A fica como robustez. A regra é a mesma nas duas, só muda o numerador:
+
+- `cobertura_t = numerador_t / despesa financeira_t` (EBITDA na B, EBIT na A), usando o ano completo (4º trimestre). Se a despesa for menor ou igual a zero (contaminação cambial), a cobertura é NaN.
 - `distress_t = 1` se `cobertura_t < 1`.
 - `Y_t = 1` se a empresa está em distress em **t+1 e t+2**, **ou** se tem um **evento de crédito** em t+1 ou t+2; `Y_t = 0` se os dois anos são classificáveis e nenhuma das duas coisas acontece.
 - **Evento de crédito** (`cfg.EVENTO_CREDITO_NO_ALVO`): recuperação judicial ou extrajudicial, falência, liquidação ou saída da bolsa em crise (cancelamento de ofício pela CVM, que cancela quem parou de publicar). Fontes: cadastro da CVM e `data/raw/eventos/eventos_credito.csv`. Existe porque a empresa que quebra costuma **parar de publicar balanço**: sem essa regra, o `Y` dela ficaria NaN e o caso mais importante sairia da amostra. Cancelamento voluntário (OPA) e incorporação não são eventos.
 - Amostra em risco: empresas **fora** de distress em t (`cobertura_t ≥ 1`) e sem evento de crédito até t, com t de 2010 a 2023.
-- Resultado (alvo com EBIT): **2.354 empresa-anos, 377 empresas e 301 eventos (12,8%)**, dos quais 103 em empresas que só existem na DFP. 60 empresas têm evento de crédito.
-- Divisão temporal sem embaralhar os anos e com 2 anos de intervalo: treino t = 2010–2018 (1.391 obs., 14,2% de eventos), validação t = 2019–2020 (369 obs., 9,2%) e teste t = 2021–2023 (594 obs., 11,8%).
+- Amostra da modelagem (alvo B, sem anos pré-registro): **2.652 empresa-anos, 388 empresas e 215 eventos (8,1%)**, dos quais 88 em empresas que só existem na DFP. 59 empresas têm evento de crédito.
+- Divisão temporal sem embaralhar os anos e com 2 anos de intervalo: treino t = 2010–2018 (1.571 obs., 151 eventos, 9,6%), validação t = 2019–2020 (383 obs., 17 eventos, 4,4%) e teste t = 2021–2023 (698 obs., 47 eventos, 6,7%).
+- Com o alvo A (EBIT), a amostra tem 2.199 empresa-anos e 282 eventos (12,8%).
 
 ## Variáveis explicativas
 
@@ -92,10 +93,10 @@ Ver `notebooks/01_inspecao.ipynb` (Fase 1). Resumo:
 
 **A correção** (`src/cvm_dfp.py`, notebook 02, seções 3b e 4a):
 1. As companhias não financeiras com ações em bolsa que não estão no Economatica entram pela **DFP da CVM**: **223 empresas e 1.993 empresas-anos**, quase todas canceladas.
-2. **Validação:** para as 289 empresas que estão nas duas fontes, a DFP reproduz o Economatica a menos de 1% em ~98% das empresas-ano (balanço, receita, EBIT, despesa financeira, FCO; lucro e EBITDA ~90%), e a classificação de distress concorda em **mais de 99%**.
+2. **Validação:** para as 282 empresas que estão nas duas fontes, a DFP reproduz o Economatica a menos de 1% em ~98% das empresas-ano (balanço, receita, EBIT, despesa financeira, FCO; lucro e EBITDA ~90%), e a classificação de distress concorda em **mais de 99%**.
 3. O alvo ganhou o **evento de crédito** (ver acima), para que a empresa que para de publicar balanço em crise conte como evento.
 
-**Resultado:** a base cobre **92–96%** das companhias não financeiras com ações em bolsa em todos os anos. Nas empresas que faltavam, a taxa de eventos é **15,9%**, contra 11,6% nas do Economatica, o que confirma que o viés deixava a amostra mais "saudável" que a realidade.
+**Resultado:** a base cobre **92–96%** das companhias não financeiras com ações em bolsa em todos os anos. Nas empresas que faltavam, a taxa de eventos é **10,9%**, contra 6,9% nas do Economatica (alvo B; com o alvo A, 15,9% contra 11,6%), o que confirma que o viés deixava a amostra mais "saudável" que a realidade.
 
 **O que ainda falta:**
 - 12 companhias canceladas em 2010–2011 não publicaram DFP no período e continuam fora;
@@ -125,6 +126,42 @@ src/             config.py (constantes), dados.py (leitura), cvm_dfp.py (DFP da 
 figures/         PNGs para os slides
 ```
 
-## Resultados *(a preencher)*
+## Resultados (`notebooks/05_modelagem.ipynb`)
 
-## Limitações *(a preencher)*
+Modelos: Z''-score de Altman recalibrado (baseline), regressão logística L2 (principal, com pesos de classe), modelo linear de probabilidade (referência), gradient boosting e random forest (desafiantes, hiperparâmetros fixos). Hiperparâmetros e limiares vêm de validação temporal dentro do treino; o teste (t = 2021–2023) foi aberto uma vez.
+
+**Hipóteses** (treino, erro-padrão agrupado por empresa, razão de chances por +1 desvio-padrão):
+
+| hipótese | logística | modelo linear | veredito |
+|---|---|---|---|
+| H1 alavancagem (+) | 1,42 (p = 0,02) | +3,3 p.p. (p = 0,01) | confirma |
+| H1 dívida de curto prazo (+) | 1,42 (p = 0,006) | +3,3 p.p. (p = 0,008) | confirma |
+| H2 ROA (−) | 0,94 (p = 0,60) | −0,6 p.p. (p = 0,60) | não confirma |
+| H3 liquidez (−) | 1,00 (p = 0,97) | −0,1 p.p. (p = 0,93) | não confirma |
+| H4 FCO/dívida (−) | 0,55 (p = 0,33) | −2,1 p.p. (p = 0,01) | só no modelo linear |
+
+**Previsão** (teste, 698 empresa-anos, 47 eventos, taxa de 6,7%):
+
+| modelo | AUC-PR | AUC-ROC | recall nos 20% de maior risco |
+|---|---|---|---|
+| Z'' recalibrado | 0,181 | 0,610 | 45% |
+| logística L2 (pesos) | 0,107 | 0,639 | 38% |
+| gradient boosting | 0,115 | 0,706 | 34% |
+| random forest | 0,131 | 0,740 | 43% |
+
+- Na AUC-PR, nenhum modelo supera o Z''. A diferença da logística é de −0,075 (intervalo de 90% por bootstrap por empresa: −0,19 a −0,003).
+- Na AUC-ROC, o random forest supera o Z'' (+0,12; intervalo de +0,03 a +0,23): há não linearidade que as árvores captam, mas não no topo do ranking.
+- No limiar (F2, escolhido no treino), a logística marca 148 empresas e capta 18 dos 47 distress (38%), com precisão de 12%. Com pesos de classe, as probabilidades ficam infladas (22% a 62% previstos contra 4% a 13% observados): é um ranking, não um risco absoluto.
+- Importância por permutação (treino): FCO/dívida é a 1ª nas árvores e a 3ª na logística; o tamanho fica entre as três primeiras nos três modelos.
+- Robustez: com o alvo A, sem as empresas sem dívida ou sem o setor, o Z'' continua à frente na AUC-PR.
+
+**Resposta à pergunta:** há associação no sentido esperado, mas robusta só para a dívida (H1). Como previsores, os indicadores ordenam o risco acima do acaso, sem superar o Z'' de Altman recalibrado.
+
+## Limitações
+
+- **Poucos eventos:** 151 no treino, 17 na validação e 47 no teste. Os intervalos da AUC-PR vão de 0,08 a 0,31.
+- **Viés de sobrevivência residual:** 12 companhias listadas canceladas no período não publicaram DFP; quem entrou em RJ e já saiu não aparece como evento.
+- **Alvo:** baseado na despesa financeira **bruta** do Economatica (inclui variação cambial e monetária); com EBIT no lugar do EBITDA, a ordem entre logística e Z'' muda na AUC-ROC.
+- **Setor provisório** (macrossetores da CVM) e **sem controle de tempo**: a taxa de eventos vai de 3,6% a 20,5% por ano, então o limiar de um período não vale para o outro.
+- **Associação, não causalidade**; a flag `sem_divida` é frágil.
+- **Árvores sem tuning:** a comparação com o machine learning é indicativa.

@@ -40,9 +40,14 @@ def calcular(ea, nome):
     return out
 
 
+def _anos_completos(ea):
+    """Sem os anos pré-registro e sem os anos depois de cfg.ULTIMO_ANO_DADOS (2026 tem 1 empresa só e distorcia as médias)."""
+    return ea[~ea['pre_registro'].astype(bool) & (ea['ano'] <= cfg.ULTIMO_ANO_DADOS)]
+
+
 def prevalencia_por_ano(ea, numerador):
     """% das empresas classificáveis com cobertura < 1, por ano (sem os anos pré-registro)."""
-    d = ea[~ea['pre_registro'].astype(bool)]
+    d = _anos_completos(ea)
     c = cobertura(d, numerador)
     return (c[c.notna()] < 1).groupby(d.loc[c.notna(), 'ano']).mean()
 
@@ -50,7 +55,7 @@ def prevalencia_por_ano(ea, numerador):
 def prevalencia_persistente_por_ano(ea, numerador, anos=3):
     """% das empresas com cobertura < 1 em t e nos `anos`−1 anos anteriores (todos classificáveis).
     É a medida comparável à de empresas "zumbi" do BIS (cobertura < 1 por 3 anos seguidos)."""
-    d = ea[~ea['pre_registro'].astype(bool)]
+    d = _anos_completos(ea)
     c = cobertura(d, numerador)
     dist = pd.Series(np.where(c.isna(), np.nan, (c < 1).astype(float)),
                      index=pd.MultiIndex.from_arrays([d['ticker'], d['ano']]))

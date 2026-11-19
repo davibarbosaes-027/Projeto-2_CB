@@ -191,6 +191,45 @@ def fig_calibracao(y, previsoes, destaque):
     return fig, ax
 
 
+ROTULOS_IMP = {'fco_divida': 'FCO / dívida', 'divida_cp_share': 'Dívida de curto prazo', 'roa': 'ROA',
+               'liquidez': 'Liquidez', 'alavancagem': 'Alavancagem', 'setor': 'Setor', 'log_ativo': 'Tamanho',
+               'sem_divida': 'Sem dívida (flag)'}
+
+
+def fig_importancia(imp, destaque=None):
+    """Um painel por modelo (colunas de `imp`), mesma escala; ordem das variáveis pela do primeiro modelo."""
+    imp = imp.sort_values(imp.columns[0])
+    fig, axs = plt.subplots(1, imp.shape[1], figsize=cfg.TAMANHO_FIG, sharey=True)
+    lo, hi = min(0, imp.min().min()) * 1.15, imp.max().max() * 1.15
+    for ax, col in zip(np.atleast_1d(axs), imp.columns):
+        ax.barh(range(len(imp)), imp[col], color=cfg.COR_DESTAQUE if col == destaque else '#8C8C8C', height=0.8)
+        ax.axvline(0, color=cfg.COR_EIXO, lw=1)
+        ax.set_xlim(lo, hi)
+        ax.set_title(col, loc='left', fontsize=12)
+        ax.set_xlabel('Queda da AUC-ROC ao embaralhar')
+        ax.xaxis.set_major_formatter(style.formatador(2))
+        ax.grid(axis='y', visible=False)
+    np.atleast_1d(axs)[0].set_yticks(range(len(imp)), [ROTULOS_IMP.get(v, v) for v in imp.index])
+    return fig, axs
+
+
+def fig_residuos(paineis):
+    """`paineis` = {título: saída de modelagem.residuos_por_faixa}. Resíduo médio por faixa com banda de ±2 EP."""
+    fig, axs = plt.subplots(1, len(paineis), figsize=cfg.TAMANHO_FIG, sharey=True)
+    for i, (ax, (tit, r)) in enumerate(zip(np.atleast_1d(axs), paineis.items())):
+        ax.fill_between(r['p'], -2 * r['ep'], 2 * r['ep'], color=cfg.CINZA_GRID, label='±2 erros-padrão')
+        ax.plot(r['p'], r['residuo'], 'o-', color=cfg.COR_DESTAQUE, lw=3, ms=8)
+        ax.axhline(0, color=cfg.COR_EIXO, lw=1)
+        ax.set_title(tit, loc='left', fontsize=12)
+        ax.set_xlabel('Probabilidade ajustada (média da faixa)')
+        ax.xaxis.set_major_formatter(style.formatador(0, pct=True))
+        ax.yaxis.set_major_formatter(style.formatador(1, pct=True))
+        if i == 0:
+            ax.set_ylabel('Resíduo médio (observado − ajustado)')
+            ax.legend(loc='upper left', fontsize=9.5)
+    return fig, axs
+
+
 def fig_selecao_c(tab, c_escolhido):
     """AUC-PR fora da amostra (validação temporal no treino) em função de C."""
     fig, ax = plt.subplots(figsize=cfg.TAMANHO_FIG)

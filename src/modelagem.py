@@ -11,7 +11,8 @@ import pandas as pd
 from scipy import stats
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.metrics import roc_auc_score
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -181,6 +182,14 @@ def pipeline_gb(usar_setor=True, regra=None):
     é direta, basta substituir o classificador."""
     clf = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=150, min_samples_leaf=20,
                                          l2_regularization=1.0, class_weight='balanced', random_state=cfg.SEED)
+    return Pipeline([('prep', preprocessador(False, usar_setor, regra)), ('clf', clf)])
+
+
+def pipeline_rf(usar_setor=True, regra=None):
+    """Segundo desafiante não linear: random forest com árvores rasas e folhas grandes (mesma lógica do gradient
+    boosting: com poucos eventos, árvores profundas decoram o treino). Hiperparâmetros FIXOS (não foram tunados)."""
+    clf = RandomForestClassifier(n_estimators=500, max_depth=5, min_samples_leaf=20, max_features='sqrt',
+                                 class_weight='balanced_subsample', n_jobs=-1, random_state=cfg.SEED)
     return Pipeline([('prep', preprocessador(False, usar_setor, regra)), ('clf', clf)])
 
 
@@ -381,6 +390,74 @@ def tabela_hipoteses(coefs, nivel=0.10):
                        'sinal estimado': '+' if r['coef'] > 0 else '−', 'odds_ratio': r['odds_ratio'], 'or_inf': r['or_inf'],
                        'or_sup': r['or_sup'], 'p': r['p'], 'veredito': ver})
     return pd.DataFrame(linhas).set_index('variável')
+
+
+# ---------------------------------------------------------------- importância por permutação (só treino)
+def importancia_permutacao(fabricas, treino, dobras, n_rep=10, seed=cfg.SEED):
+    """Queda da AUC-ROC ao embaralhar cada variável de entrada na validação de cada dobra temporal do treino.
+
+    `fabricas` = {nome: função sem argumentos que devolve um Pipeline novo}. Cada modelo é ajustado no treino da dobra e
+    avaliado na validação da dobra; embaralhamos UMA coluna crua de cada vez (o setor inteiro conta como uma variável),
+    `n_rep` vezes. Devolve DataFrame (variável × modelo) com a queda média nas dobras e repetições. O teste não é tocado."""
+    rng = np.random.default_rng(seed)
+    cols = colunas_modelo()
+    linhas = []
+    for nome, fab in fabricas.items():
+        for tr, va, ano in dobras:
+            m = ajustar(fab(), treino.iloc[tr])
+            Xv, yv = treino.iloc[va][colunas_entrada()].reset_index(drop=True), treino.iloc[va]['Y'].to_numpy()
+            base = roc_auc_score(yv, m.predict_proba(Xv)[:, 1])
+            for c in cols:
+                quedas = []
+                for _ in range(n_rep):
+                    Xp = Xv.copy()
+                    Xp[c] = Xv[c].to_numpy()[rng.permutation(len(Xv))]
+                    quedas.append(base - roc_auc_score(yv, m.predict_proba(Xp)[:, 1]))
+                linhas.append({'modelo': nome, 'ano': ano, 'variável': c, 'queda': np.mean(quedas)})
+    d = pd.DataFrame(linhas)
+    return d.pivot_table(index='variável', columns='modelo', values='queda', aggfunc='mean')[list(fabricas)]
+
+
+# ---------------------------------------------------------------- modelo linear de probabilidade (referência)
+def mqo_agrupado(X, y, grupos):
+    """Modelo linear de probabilidade: MQO com constante e erro-padrão agrupado por empresa (mesma correção de pequenas
+    amostras do logit_agrupado). Coeficientes = efeito em pontos de probabilidade por +1 desvio-padrão.
+    Devolve DataFrame (coef, ep, t, p) com attrs N, empresas, R², ajustados e fração de ajustados < 0."""
+    Xc = np.column_stack([np.ones(len(X)), X.to_numpy(dtype=float)])
+    nomes = ['const'] + list(X.columns)
+    y = np.asarray(y, dtype=float)
+    pao = np.linalg.pinv(Xc.T @ Xc)
+    b = pao @ Xc.T @ y
+    ajust = Xc @ b
+    e = y - ajust
+    g = pd.factorize(np.asarray(grupos))[0]
+    soma = np.zeros((g.max() + 1, Xc.shape[1]))
+    np.add.at(soma, g, Xc * e[:, None])
+    G, N, K = soma.shape[0], len(y), Xc.shape[1]
+    V = (G / (G - 1)) * ((N - 1) / (N - K)) * pao @ (soma.T @ soma) @ pao
+    ep = np.sqrt(np.diag(V))
+    t = b / ep
+    out = pd.DataFrame({'coef': b, 'ep': ep, 't': t, 'p': 2 * stats.t.sf(np.abs(t), G - 1)}, index=nomes)
+    out.attrs.update({'N': N, 'empresas': G, 'R2': 1 - (e ** 2).sum() / ((y - y.mean()) ** 2).sum(),
+                      'ajustados': ajust, 'frac_negativos': float((ajust < 0).mean())})
+    return out
+
+
+def prob_logit(coefs, X):
+    """Probabilidade ajustada da logística sem penalização (saída de logit_agrupado) na matriz X."""
+    b = coefs['coef']
+    eta = b['const'] + X[b.index[1:]].to_numpy(dtype=float) @ b.iloc[1:].to_numpy()
+    return 1 / (1 + np.exp(-eta))
+
+
+def residuos_por_faixa(y, p, faixas=10):
+    """Resíduo médio (observado − ajustado) por faixa de probabilidade ajustada, com ±2 erros-padrão binomiais."""
+    d = pd.DataFrame({'y': np.asarray(y, dtype=float), 'p': np.asarray(p, dtype=float)})
+    d['faixa'] = pd.qcut(d['p'].rank(method='first'), faixas, labels=False)
+    r = d.groupby('faixa').agg(p=('p', 'mean'), obs=('y', 'mean'), n=('y', 'size'))
+    r['residuo'] = r['obs'] - r['p']
+    r['ep'] = np.sqrt(r['p'].clip(0.001, 0.999) * (1 - r['p'].clip(0.001, 0.999)) / r['n'])
+    return r
 
 
 # ---------------------------------------------------------------- cenários de robustez
